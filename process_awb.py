@@ -123,7 +123,7 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
     pesanan_rows, detail_rows = [], []
     counter = 0
     for data in results:
-        pesanan_rows.append([data["no_awb"], "", "", "Pending"])
+        pesanan_rows.append([data["no_awb"], data["no_pesanan"] or "", "", "", "Pending"])
         for item in data["items"]:
             counter += 1
             id_detail = f"DT-{data['no_awb']}-{counter}"
@@ -134,7 +134,7 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
     if pesanan_rows:
         sheets_service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range=f"{SHEET_PESANAN}!A:D",
+            range=f"{SHEET_PESANAN}!A:E",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             body={"values": pesanan_rows},
