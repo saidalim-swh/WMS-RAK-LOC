@@ -139,6 +139,16 @@ def extract_all_pages(pdf_bytes):
     return results
 
 
+def _get_next_empty_row(sheets_service, spreadsheet_id, sheet_name):
+    """Hitung baris kosong berikutnya berdasarkan kolom A saja - lebih bisa
+    diandalkan daripada mengandalkan auto-detect dari values.append()."""
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=f"{sheet_name}!A:A"
+    ).execute()
+    values = result.get("values", [])
+    return len(values) + 1  # +1 karena baris berikutnya setelah data terakhir
+
+
 def write_to_sheets(sheets_service, spreadsheet_id, results):
     pesanan_rows, detail_rows = [], []
     counter = 0
@@ -152,20 +162,22 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
             )
 
     if pesanan_rows:
-        sheets_service.spreadsheets().values().append(
+        next_row = _get_next_empty_row(sheets_service, spreadsheet_id, SHEET_PESANAN)
+        last_row = next_row + len(pesanan_rows) - 1
+        sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"{SHEET_PESANAN}!A:E",
+            range=f"{SHEET_PESANAN}!A{next_row}:E{last_row}",
             valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
             body={"values": pesanan_rows},
         ).execute()
 
     if detail_rows:
-        sheets_service.spreadsheets().values().append(
+        next_row = _get_next_empty_row(sheets_service, spreadsheet_id, SHEET_DETAIL)
+        last_row = next_row + len(detail_rows) - 1
+        sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"{SHEET_DETAIL}!A:H",
+            range=f"{SHEET_DETAIL}!A{next_row}:H{last_row}",
             valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
             body={"values": detail_rows},
         ).execute()
 
