@@ -1,0 +1,28 @@
+name: Process AWB PDF
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # jalan tiap 5 menit
+  workflow_dispatch: {}      # bisa juga dipicu manual dari tab Actions di GitHub
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan proses ekstraksi AWB
+        env:
+          GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_KEY_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          FOLDER_ID_AWB_MASUK: ${{ secrets.FOLDER_ID_AWB_MASUK }}
+        run: python process_awb.py
