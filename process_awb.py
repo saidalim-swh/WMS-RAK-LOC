@@ -96,9 +96,11 @@ def extract_page(text):
         m2 = re.search(r"Order\s*Id\s*:\s*(\d+)", text, re.IGNORECASE)
         no_pesanan = m2.group(1) if m2 else None
 
-    raw_items = re.findall(r"\b([A-Z]{2,}\d{4,})\b[^\n]*?\1\D+(\d+)\b", text)
+    raw_items = re.findall(r"\b([A-Z]{2,}\d{4,})(?:\b)?.{0,250}?\1\D{0,10}(\d+)\b", text, re.DOTALL)
     items, seen = [], set()
     for sku, qty in raw_items:
+        if sku == no_awb:
+            continue  # kode AWB ikut kebaca sebagai "item" - buang
         key = (sku, qty)
         if key in seen:
             continue
@@ -109,13 +111,31 @@ def extract_page(text):
 
 
 def extract_all_pages(pdf_bytes):
+    """
+    Ekstrak semua halaman. Kalau 1 AWB punya banyak barang, daftarnya bisa
+    'meluber' ke halaman berikutnya - halaman lanjutan itu TIDAK punya
+    barcode/No_AWB lagi. Halaman seperti itu dianggap lanjutan dari AWB
+    terakhir yang terdeteksi, bukan dibuang.
+    """
     results = []
+    current = None
     with pdfplumber.open(pdf_bytes) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
             data = extract_page(text)
+
             if data["no_awb"]:
-                results.append(data)
+                # halaman baru dengan No_AWB sendiri -> mulai entry baru
+                current = data
+                results.append(current)
+            elif current is not None and data["items"]:
+                # halaman tanpa No_AWB tapi ada data item -> lanjutan AWB sebelumnya
+                existing_keys = {(it["sku"], it["qty"]) for it in current["items"]}
+                for item in data["items"]:
+                    key = (item["sku"], item["qty"])
+                    if key not in existing_keys:
+                        current["items"].append(item)
+                        existing_keys.add(key)
     return results
 
 
