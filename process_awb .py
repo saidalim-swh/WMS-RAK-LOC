@@ -31,6 +31,8 @@ SCOPES = [
 
 SHEET_PESANAN = "Pesanan"
 SHEET_DETAIL = "Detail_Pesanan"
+SHEET_PRODUK = "Produk"
+SHEET_STOK = "Stok"
 
 
 def get_services():
@@ -96,18 +98,45 @@ def extract_page(text):
         m2 = re.search(r"Order\s*Id\s*:\s*(\d+)", text, re.IGNORECASE)
         no_pesanan = m2.group(1) if m2 else None
 
-    raw_items = re.findall(r"\b([A-Z]{2,}\d{4,})(?:\b)?.{0,250}?\1\D{0,10}(\d+)\b", text, re.DOTALL)
+    # Item fisik: SEMUA kode SKU barang fisik Lemonilo selalu diawali "IFD"
+    # (beda dari kode SKU paket/bundle yang diawali "OS..."). Cukup cari pola
+    # "IFD... <spasi> <qty>" di mana saja di teks - TIDAK perlu 2 kemunculan
+    # token yang sama (beda dari pendekatan lama yang gagal kalau bagian
+    # "pembuka" rusak/tumpang tindih akibat PDF sumbernya sendiri).
+    # Contoh yang harus tertangkap:
+    #   "IFDBC00016 30"        -> normal
+    #   "IFDBC00016- 10"       -> varian TTS/renceng, strip tanda '-' di akhir
+    #   "...garbled...IFDBC00016 30" -> tetap ketemu walau teks sebelumnya rusak
+    raw_items = re.findall(r"\b(IFD[A-Z0-9]+?)-?\s+(\d+)\b", text)
     items, seen = [], set()
     for sku, qty in raw_items:
         if sku == no_awb:
-            continue  # kode AWB ikut kebaca sebagai "item" - buang
+            continue  # jaga-jaga, walau harusnya tidak akan pernah collide
         key = (sku, qty)
         if key in seen:
             continue
         seen.add(key)
         items.append({"sku": sku, "qty": int(qty)})
 
-    return {"no_awb": no_awb, "no_pesanan": no_pesanan, "items": items}
+    # Pengaman: kalau produk disebut "campur beberapa rasa" (mis. "9 Renceng
+    # (3 Chocochips + 3 keju + 3 Strawberry)") tapi jumlah item yang berhasil
+    # dibaca tidak sesuai jumlah rasa yang disebut - ini indikasi ada item
+    # yang gagal terbaca akibat teks PDF yang tumpang tindih (bukan bug regex,
+    # tapi masalah di PDF sumbernya). Kasih peringatan supaya dicek manual.
+    warning = None
+    # (?!\+) mencegah nomor telepon format "(+62)81..." ikut kedeteksi -
+    # bundle asli selalu diawali angka (mis. "(3 Chocochips + 3 keju...)"),
+    # bukan simbol '+' di awal seperti kode telepon.
+    bundle_match = re.search(r"\((?!\+)([^()]*\+[^()]*)\)", text)
+    if bundle_match:
+        expected_flavors = bundle_match.group(1).count("+") + 1
+        if len(items) < expected_flavors:
+            warning = (
+                f"Terdeteksi varian campur ({expected_flavors} rasa) tapi cuma "
+                f"{len(items)} item yang terbaca - kemungkinan ada item hilang, cek manual."
+            )
+
+    return {"no_awb": no_awb, "no_pesanan": no_pesanan, "items": items, "warning": warning}
 
 
 def extract_all_pages(pdf_bytes):
@@ -136,6 +165,8 @@ def extract_all_pages(pdf_bytes):
                     if key not in existing_keys:
                         current["items"].append(item)
                         existing_keys.add(key)
+                if data.get("warning") and not current.get("warning"):
+                    current["warning"] = data["warning"]
     return results
 
 
@@ -149,16 +180,83 @@ def _get_next_empty_row(sheets_service, spreadsheet_id, sheet_name):
     return len(values) + 1  # +1 karena baris berikutnya setelah data terakhir
 
 
+def build_sku_to_barcode_lookup(sheets_service, spreadsheet_id):
+    """Baca tabel Produk, bikin mapping SKU -> Barcode_Produk (nomor barcode asli)."""
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=f"{SHEET_PRODUK}!A:C"
+    ).execute()
+    rows = result.get("values", [])
+    if not rows:
+        return {}
+    header = rows[0]
+    try:
+        idx_barcode = header.index("Barcode_Produk")
+        idx_sku = header.index("SKU")
+    except ValueError:
+        print("PERINGATAN: kolom Barcode_Produk/SKU tidak ditemukan di tabel Produk, lookup dilewati.")
+        return {}
+
+    lookup = {}
+    for row in rows[1:]:
+        if len(row) > max(idx_barcode, idx_sku):
+            sku = str(row[idx_sku]).strip()
+            barcode = str(row[idx_barcode]).strip()
+            if sku:
+                lookup[sku] = barcode
+    return lookup
+
+
+def build_sku_to_rak_lookup(sheets_service, spreadsheet_id):
+    """Baca tabel Stok, bikin mapping SKU -> Kode_Rak (lokasi barang di gudang).
+    Kalau 1 SKU ada di beberapa rak, dipakai kemunculan pertama saja."""
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=f"{SHEET_STOK}!A:E"
+    ).execute()
+    rows = result.get("values", [])
+    if not rows:
+        return {}
+    header = rows[0]
+    try:
+        idx_sku = header.index("SKU")
+        idx_rak = header.index("Kode_Rak")
+    except ValueError:
+        print("PERINGATAN: kolom SKU/Kode_Rak tidak ditemukan di tabel Stok, lookup dilewati.")
+        return {}
+
+    lookup = {}
+    for row in rows[1:]:
+        if len(row) > max(idx_sku, idx_rak):
+            sku = str(row[idx_sku]).strip()
+            rak = str(row[idx_rak]).strip()
+            if sku and sku not in lookup:  # ambil kemunculan pertama saja
+                lookup[sku] = rak
+    return lookup
+
+
 def write_to_sheets(sheets_service, spreadsheet_id, results):
+    sku_to_barcode = build_sku_to_barcode_lookup(sheets_service, spreadsheet_id)
+    sku_to_rak = build_sku_to_rak_lookup(sheets_service, spreadsheet_id)
+
     pesanan_rows, detail_rows = [], []
     counter = 0
     for data in results:
-        pesanan_rows.append([data["no_awb"], data["no_pesanan"] or "", "", "", "Pending"])
+        # Urutan kolom Pesanan: No_AWB | No_Pesanan | ID_Shopify | Tanggal | Picker | Status
+        # ID_Shopify dikosongkan (bukan hasil ekstraksi PDF, diisi manual/integrasi lain kalau ada)
+        pesanan_rows.append([data["no_awb"], data["no_pesanan"] or "", "", "", "", "Pending"])
         for item in data["items"]:
             counter += 1
+            sku = item["sku"]
+            barcode = sku_to_barcode.get(sku)
+            if not barcode:
+                print(f"PERINGATAN: SKU {sku} tidak ditemukan di tabel Produk, dipakai apa adanya.")
+                barcode = sku
+            kode_rak = sku_to_rak.get(sku, "")
+            if not kode_rak:
+                print(f"PERINGATAN: SKU {sku} tidak ditemukan di tabel Stok, Kode_Rak dikosongkan.")
+
             id_detail = f"DT-{data['no_awb']}-{counter}"
             detail_rows.append(
-                [id_detail, data["no_awb"], item["sku"], "", item["qty"], 0, "", "Belum"]
+                [id_detail, data["no_awb"], barcode, kode_rak, item["qty"], 0, "", "Belum"]
             )
 
     if pesanan_rows:
@@ -166,7 +264,7 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
         last_row = next_row + len(pesanan_rows) - 1
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"{SHEET_PESANAN}!A{next_row}:E{last_row}",
+            range=f"{SHEET_PESANAN}!A{next_row}:F{last_row}",
             valueInputOption="RAW",
             body={"values": pesanan_rows},
         ).execute()
@@ -201,6 +299,9 @@ def main():
             results = extract_all_pages(pdf_bytes)
             n_pesanan, n_detail = write_to_sheets(sheets_service, spreadsheet_id, results)
             print(f"  -> {len(results)} AWB ditemukan, {n_pesanan} baris Pesanan, {n_detail} baris Detail")
+            for r in results:
+                if r.get("warning"):
+                    print(f"  ⚠ PERINGATAN untuk No_AWB {r['no_awb']}: {r['warning']}")
             move_file(drive_service, f["id"], processed_folder_id, folder_id)
             print(f"  -> dipindah ke folder Processed")
         except Exception as e:
