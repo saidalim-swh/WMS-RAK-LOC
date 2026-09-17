@@ -92,10 +92,24 @@ def extract_page(text):
     candidates = re.findall(r"\b[A-Z]{2,5}\d{6,12}\b", text)
     no_awb = Counter(candidates).most_common(1)[0][0] if candidates else None
 
-    m = re.search(r"No\.?\s*Pesanan\s*:\s*(\d+)", text)
+    if not no_awb:
+        # Fallback untuk format AWB murni angka (Shopee Economy/Standard/Regular,
+        # Cargo, FastTrack) yang tidak punya awalan huruf sama sekali.
+        fallback_patterns = [
+            r"\|\s*[A-Z]{2,5}\s+(\d{10,15})\b",              # "MKSX9 | MKS 11004386937208"
+            r"[A-Z]{2,4}-[A-Z0-9]+-[A-Z0-9]+\s+(\d{10,15})\b",  # "PDG-PMM001A-KU 201773297878"
+            r"FastTrack\s*\n\s*(\d{10,15})\b",                # "FastTrack\n570606842138"
+        ]
+        for pat in fallback_patterns:
+            fm = re.search(pat, text)
+            if fm:
+                no_awb = fm.group(1)
+                break
+
+    m = re.search(r"No\.?\s*Pesanan\s*:\s*([A-Za-z0-9]+)", text)
     no_pesanan = m.group(1) if m else None
     if not no_pesanan:
-        m2 = re.search(r"Order\s*Id\s*:\s*(\d+)", text, re.IGNORECASE)
+        m2 = re.search(r"Order\s*Id\s*:\s*([A-Za-z0-9]+)", text, re.IGNORECASE)
         no_pesanan = m2.group(1) if m2 else None
 
     # Item fisik: SEMUA kode SKU barang fisik Lemonilo selalu diawali "IFD"
@@ -152,6 +166,15 @@ def extract_all_pages(pdf_bytes):
         for page in pdf.pages:
             text = page.extract_text() or ""
             data = extract_page(text)
+
+            # Halaman "asli" (bukan lanjutan) selalu punya info pengirim/penerima.
+            # Halaman lanjutan cuma berisi sambungan tabel barang saja.
+            has_header = bool(re.search(r"Penerima|Pengirim|Receiver|Sender", text, re.IGNORECASE))
+
+            if not data["no_awb"] and has_header and data["no_pesanan"]:
+                # Halaman baru asli tapi tidak ada AWB terpisah (mis. tipe "INSTANT")
+                # - No_Pesanan dipakai sebagai identitas fisik pengganti.
+                data["no_awb"] = data["no_pesanan"]
 
             if data["no_awb"]:
                 # halaman baru dengan No_AWB sendiri -> mulai entry baru
