@@ -236,7 +236,7 @@ def write_sheet(sheets_service, spreadsheet_id, data):
 
 def main():
     spreadsheet_id = os.environ["SPREADSHEET_ID"]
-    folder_id = os.environ["FOLDER_ID_AWB_MASUK"]
+    folder_id = os.environ["FOLDER_ID_DN_MASUK"]
 
     drive, sheets = get_services()
 
