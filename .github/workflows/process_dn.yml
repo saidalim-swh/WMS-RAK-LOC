@@ -10,6 +10,11 @@ jobs:
   process-dn:
     runs-on: ubuntu-latest
 
+    env:
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_KEY_JSON }}
+      FOLDER_ID_DN_MASUK: ${{ secrets.FOLDER_ID_DN_MASUK }}    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
