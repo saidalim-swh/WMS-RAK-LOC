@@ -53,6 +53,17 @@ def get_services():
     )
 
 
+def move_to_processed(drive_service, file_id):
+    processed_folder = os.environ["FOLDER_ID_DN_PROCESSED"]
+
+    drive_service.files().update(
+        fileId=file_id,
+        addParents=processed_folder,
+        removeParents=os.environ["FOLDER_ID_DN_MASUK"],
+        fields="id, parents"
+    ).execute()
+
+
 def list_new_pdfs(drive_service, folder_id):
     query = (
         f"'{folder_id}' in parents "
@@ -190,7 +201,7 @@ def write_sheet(sheets_service, spreadsheet_id, data):
 
 def main():
     spreadsheet_id = os.environ["SPREADSHEET_ID"]
-    folder_id = os.environ["FOLDER_ID_DN_MASUK"]
+    folder_id = os.environ["FOLDER_ID_AWB_MASUK"]
 
     drive, sheets = get_services()
 
@@ -208,8 +219,13 @@ def main():
                 data
             )
 
+            move_to_processed(
+                drive,
+                file["id"]
+            )
+
             print(
-                f"Berhasil proses DN {data['no_awb']}"
+                f"Berhasil proses DN {data['no_awb']} dan dipindahkan ke Processed"
             )
         else:
             print(
