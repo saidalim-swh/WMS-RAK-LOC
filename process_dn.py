@@ -53,13 +53,48 @@ def get_services():
     )
 
 
+def get_or_create_processed_folder(drive_service, parent_folder_id):
+    query = (
+        f"'{parent_folder_id}' in parents "
+        "and name='Processed' "
+        "and mimeType='application/vnd.google-apps.folder' "
+        "and trashed=false"
+    )
+
+    result = drive_service.files().list(
+        q=query,
+        fields="files(id,name)"
+    ).execute()
+
+    folders = result.get("files", [])
+
+    if folders:
+        return folders[0]["id"]
+
+    folder = drive_service.files().create(
+        body={
+            "name": "Processed",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_folder_id]
+        },
+        fields="id"
+    ).execute()
+
+    return folder["id"]
+
+
 def move_to_processed(drive_service, file_id):
-    processed_folder = os.environ["FOLDER_ID_DN_PROCESSED"]
+    masuk_folder = os.environ["FOLDER_ID_DN_MASUK"]
+
+    processed_folder = get_or_create_processed_folder(
+        drive_service,
+        masuk_folder
+    )
 
     drive_service.files().update(
         fileId=file_id,
         addParents=processed_folder,
-        removeParents=os.environ["FOLDER_ID_DN_MASUK"],
+        removeParents=masuk_folder,
         fields="id, parents"
     ).execute()
 
@@ -201,7 +236,7 @@ def write_sheet(sheets_service, spreadsheet_id, data):
 
 def main():
     spreadsheet_id = os.environ["SPREADSHEET_ID"]
-    folder_id = os.environ["FOLDER_ID_DN_MASUK"]
+    folder_id = os.environ["FOLDER_ID_AWB_MASUK"]
 
     drive, sheets = get_services()
 
