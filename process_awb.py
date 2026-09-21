@@ -163,6 +163,10 @@ def extract_delivery_note(pdf_bytes):
     with pdfplumber.open(pdf_bytes) as pdf:
         full_text = "\n".join((page.extract_text() or "") for page in pdf.pages)
 
+    print("=== HASIL TEXT PDF ===")
+    print(full_text[:3000])
+    print("======================")
+
     dn = re.search(r"DN\s*NO\s*[:\s]*([A-Z0-9\-]+)", full_text, re.IGNORECASE)
     no_dn = dn.group(1) if dn else None
 
