@@ -130,7 +130,7 @@ def extract_page(text):
         if key in seen:
             continue
         seen.add(key)
-        items.append({"sku": sku, "qty": int(qty), "uom": ""})
+        items.append({"sku": sku, "qty": int(qty)})
 
     # Pengaman: kalau produk disebut "campur beberapa rasa" (mis. "9 Renceng
     # (3 Chocochips + 3 keju + 3 Strawberry)") tapi jumlah item yang berhasil
@@ -153,55 +153,7 @@ def extract_page(text):
     return {"no_awb": no_awb, "no_pesanan": no_pesanan, "items": items, "warning": warning}
 
 
-
-
-def extract_delivery_note(pdf_bytes):
-    print("DEBUG: masuk extract_delivery_note")
-
-    """Parser untuk format Delivery Note Lemonilo."""
-    results = []
-    items = []
-
-    with pdfplumber.open(pdf_bytes) as pdf:
-        full_text = "\n".join((page.extract_text() or "") for page in pdf.pages)
-
-    print("DEBUG PDF TEXT START")
-    print(full_text[:5000])
-    print("DEBUG PDF TEXT END")
-
-    dn = re.search(r"DN\s*NO\s*[:\s]*([A-Z0-9\-]+)", full_text, re.IGNORECASE)
-    no_dn = dn.group(1) if dn else None
-
-    if not no_dn:
-        return []
-
-    # Item ID + Qty + UOM
-    matches = re.findall(
-        r"(IFD[A-Z0-9\-\/]+).*?(\d+)\s+(PCS|CTN|BOX|RLS)",
-        full_text,
-        re.IGNORECASE | re.DOTALL
-    )
-
-    for sku, qty, uom in matches:
-        items.append({
-            "sku": sku.strip(),
-            "qty": int(qty),
-            "uom": uom.upper()
-        })
-
-    results.append({
-        "no_awb": no_dn,
-        "no_pesanan": no_dn,
-        "items": items,
-        "warning": None,
-        "type": "LEMONILO"
-    })
-
-    return results
-
 def extract_all_pages(pdf_bytes):
-    print("DEBUG: masuk extract_all_pages")
-
     """
     Ekstrak semua halaman. Kalau 1 AWB punya banyak barang, daftarnya bisa
     'meluber' ke halaman berikutnya - halaman lanjutan itu TIDAK punya
@@ -327,7 +279,7 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
 
             id_detail = f"DT-{data['no_awb']}-{counter}"
             detail_rows.append(
-                [id_detail, data["no_awb"], barcode, kode_rak, item["qty"], 0, "", "Belum", item.get("uom", "")]
+                [id_detail, data["no_awb"], barcode, kode_rak, item["qty"], 0, "", "Belum"]
             )
 
     if pesanan_rows:
@@ -345,7 +297,7 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
         last_row = next_row + len(detail_rows) - 1
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"{SHEET_DETAIL}!A{next_row}:I{last_row}",
+            range=f"{SHEET_DETAIL}!A{next_row}:H{last_row}",
             valueInputOption="RAW",
             body={"values": detail_rows},
         ).execute()
