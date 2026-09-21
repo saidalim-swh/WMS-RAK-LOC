@@ -156,6 +156,8 @@ def extract_page(text):
 
 
 def extract_delivery_note(pdf_bytes):
+    print("DEBUG: masuk extract_delivery_note")
+
     """Parser untuk format Delivery Note Lemonilo."""
     results = []
     items = []
@@ -163,9 +165,9 @@ def extract_delivery_note(pdf_bytes):
     with pdfplumber.open(pdf_bytes) as pdf:
         full_text = "\n".join((page.extract_text() or "") for page in pdf.pages)
 
-    print("=== HASIL TEXT PDF ===")
-    print(full_text[:3000])
-    print("======================")
+    print("DEBUG PDF TEXT START")
+    print(full_text[:5000])
+    print("DEBUG PDF TEXT END")
 
     dn = re.search(r"DN\s*NO\s*[:\s]*([A-Z0-9\-]+)", full_text, re.IGNORECASE)
     no_dn = dn.group(1) if dn else None
@@ -198,6 +200,8 @@ def extract_delivery_note(pdf_bytes):
     return results
 
 def extract_all_pages(pdf_bytes):
+    print("DEBUG: masuk extract_all_pages")
+
     """
     Ekstrak semua halaman. Kalau 1 AWB punya banyak barang, daftarnya bisa
     'meluber' ke halaman berikutnya - halaman lanjutan itu TIDAK punya
