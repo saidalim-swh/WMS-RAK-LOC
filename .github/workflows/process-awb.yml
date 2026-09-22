@@ -17,12 +17,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - - name: Install dependencies
-          run: |
-            sudo apt-get update
-            sudo apt-get install -y libzbar0 poppler-utils
-            pip install pdfplumber google-api-python-client google-auth
-            pip install opencv-python pyzbar pdf2image Pillow nump
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       - name: Jalankan proses ekstraksi AWB
         env:
