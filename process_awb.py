@@ -99,6 +99,7 @@ def extract_page(text):
             r"\|\s*[A-Z]{2,5}\s+(\d{10,15})\b",              # "MKSX9 | MKS 11004386937208"
             r"[A-Z]{2,4}-[A-Z0-9]+-[A-Z0-9]+\s+(\d{10,15})\b",  # "PDG-PMM001A-KU 201773297878"
             r"FastTrack\s*\n\s*(\d{10,15})\b",                # "FastTrack\n570606842138"
+            r"[A-Z0-9\-]+\s+(\d{10,15})\b",                  # "SU2-TBG-A 004663229510"
         ]
         for pat in fallback_patterns:
             fm = re.search(pat, text)
