@@ -256,6 +256,51 @@ def build_sku_to_rak_lookup(sheets_service, spreadsheet_id):
     return lookup
 
 
+
+def get_existing_awb_pesanan(sheets_service, spreadsheet_id):
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{SHEET_PESANAN}!A:B"
+    ).execute()
+
+    rows = result.get("values", [])
+    existing = set()
+
+    for row in rows[1:]:
+        if len(row) >= 2:
+            if row[0]:
+                existing.add(("AWB", str(row[0]).strip()))
+            if row[1]:
+                existing.add(("PESANAN", str(row[1]).strip()))
+
+    return existing
+
+
+def filter_duplicate_results(sheets_service, spreadsheet_id, results):
+    existing = get_existing_awb_pesanan(
+        sheets_service,
+        spreadsheet_id
+    )
+
+    filtered = []
+
+    for data in results:
+        awb = str(data.get("no_awb") or "").strip()
+        pesanan = str(data.get("no_pesanan") or "").strip()
+
+        if ("AWB", awb) in existing or ("PESANAN", pesanan) in existing:
+            print(f"SKIP DUPLICATE: {awb} / {pesanan}")
+            continue
+
+        filtered.append(data)
+        existing.add(("AWB", awb))
+
+        if pesanan:
+            existing.add(("PESANAN", pesanan))
+
+    return filtered
+
+
 def write_to_sheets(sheets_service, spreadsheet_id, results):
     sku_to_barcode = build_sku_to_barcode_lookup(sheets_service, spreadsheet_id)
     sku_to_rak = build_sku_to_rak_lookup(sheets_service, spreadsheet_id)
@@ -320,6 +365,17 @@ def main():
         try:
             pdf_bytes = download_pdf(drive_service, f["id"])
             results = extract_all_pages(pdf_bytes)
+            results = filter_duplicate_results(
+                sheets_service,
+                spreadsheet_id,
+                results
+            )
+
+            if not results:
+                print("Semua data duplicate, tidak ditulis.")
+                move_file(drive_service, f["id"], processed_folder_id, folder_id)
+                continue
+
             n_pesanan, n_detail = write_to_sheets(sheets_service, spreadsheet_id, results)
             print(f"  -> {len(results)} AWB ditemukan, {n_pesanan} baris Pesanan, {n_detail} baris Detail")
             for r in results:
