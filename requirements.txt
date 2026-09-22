@@ -1,6 +1,6 @@
-pdfplumber==0.11.*
-google-api-python-client==2.*
-google-auth==2.*
+pdfplumber
+google-api-python-client
+google-auth
 opencv-python
 pyzbar
 pdf2image
