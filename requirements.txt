@@ -1,3 +1,8 @@
 pdfplumber==0.11.*
 google-api-python-client==2.*
 google-auth==2.*
+opencv-python
+pyzbar
+pdf2image
+Pillow
+numpy
