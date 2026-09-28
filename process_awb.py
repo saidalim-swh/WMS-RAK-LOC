@@ -122,7 +122,10 @@ def extract_page(text):
     #   "IFDBC00016 30"        -> normal
     #   "IFDBC00016- 10"       -> varian TTS/renceng, strip tanda '-' di akhir
     #   "...garbled...IFDBC00016 30" -> tetap ketemu walau teks sebelumnya rusak
-    raw_items = re.findall(r"\b(IFD[A-Z0-9]+?)-?\s+(\d+)\b", text)
+    raw_items = re.findall(
+    r"\b(IFD[A-Z0-9]+)\b(?:\s+\S+){0,15}?\s+(\d+)\b",
+    text
+    )
     items, seen = [], set()
     for sku, qty in raw_items:
         if sku == no_awb:
