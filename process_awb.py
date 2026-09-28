@@ -122,26 +122,28 @@ def extract_page(text):
     #   "IFDBC00016 30"        -> normal
     #   "IFDBC00016- 10"       -> varian TTS/renceng, strip tanda '-' di akhir
     #   "...garbled...IFDBC00016 30" -> tetap ketemu walau teks sebelumnya rusak
-raw_items = []
+    # Ekstraksi SKU lebih tahan terhadap format tabel PDF:
+    # beberapa AWB memisahkan SKU dan Qty ke posisi kolom berbeda.
+    raw_items = []
+    lines = text.splitlines()
 
-lines = text.splitlines()
+    for i, line in enumerate(lines):
+        sku_match = re.search(r"\b(IFD[A-Z0-9]+)\b", line)
+        if not sku_match:
+            continue
 
-for i, line in enumerate(lines):
-    sku_match = re.search(r"\b(IFD[A-Z0-9]+)\b", line)
-
-    if sku_match:
         sku = sku_match.group(1)
         qty = None
 
-        # cek angka di baris yang sama
-        qty_match = re.search(r"\b(\d+)\b", line.replace(sku, ""))
-        
+        # cari qty pada baris yang sama
+        same_line = line.replace(sku, "")
+        qty_match = re.search(r"\b(\d+)\b", same_line)
         if qty_match:
             qty = qty_match.group(1)
 
-        # kalau tidak ada, cari angka di 3 baris berikutnya
+        # kalau tidak ada, cari beberapa baris setelahnya
         if not qty:
-            for next_line in lines[i+1:i+4]:
+            for next_line in lines[i+1:i+5]:
                 qty_match = re.search(r"\b(\d+)\b", next_line)
                 if qty_match:
                     qty = qty_match.group(1)
@@ -149,10 +151,11 @@ for i, line in enumerate(lines):
 
         if qty:
             raw_items.append((sku, qty))
+
     items, seen = [], set()
     for sku, qty in raw_items:
         if sku == no_awb:
-            continue  # jaga-jaga, walau harusnya tidak akan pernah collide
+            continue
         key = (sku, qty)
         if key in seen:
             continue
