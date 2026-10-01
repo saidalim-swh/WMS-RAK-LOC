@@ -4,6 +4,14 @@ process_dn.py
 Khusus memproses PDF Delivery Note (DN) Lemonilo.
 Tidak mengganggu process_awb.py.
 
+Perubahan dari versi sebelumnya:
+- extract_dn() sekarang mendukung BEBERAPA DN dalam 1 file PDF
+  (sebelumnya re.search() cuma menangkap DN pertama, dan item barang
+  dari seluruh PDF tercampur jadi satu entry).
+- Ditambahkan pengecekan duplikat (mirip process_awb.py), supaya kalau
+  workflow kebetulan jalan dua kali untuk file yang sama sebelum file
+  dipindah ke folder Processed, DN yang sama tidak tertulis dobel.
+
 Output:
 Pesanan:
 A No_AWB
@@ -126,46 +134,59 @@ def download_pdf(drive_service, file_id):
 
 
 def extract_dn(pdf_bytes):
+    """
+    Ekstrak SEMUA DN dalam satu PDF (bisa lebih dari satu).
+    Mengembalikan list of dict, bisa kosong kalau tidak ada DN yang
+    terdeteksi sama sekali.
+    """
     text = ""
 
     with pdfplumber.open(pdf_bytes) as pdf:
         for page in pdf.pages:
             text += "\n" + (page.extract_text() or "")
 
-    # DN NO
-    dn_match = re.search(
+    # Cari SEMUA kemunculan "DN NO", bukan cuma yang pertama
+    matches = list(re.finditer(
         r"DN\s*NO\s*[:\s]*([A-Z0-9\-]+)",
         text,
         re.IGNORECASE
-    )
+    ))
 
-    if not dn_match:
-        return None
+    if not matches:
+        return []
 
-    dn_no = dn_match.group(1).strip()
+    results = []
+    for i, m in enumerate(matches):
+        dn_no = m.group(1).strip()
 
-    items = []
+        # Potong teks: dari akhir match DN ini sampai sebelum DN
+        # berikutnya (atau sampai akhir teks kalau ini DN terakhir).
+        # Supaya item barang dicari PER-DN, bukan dari teks gabungan
+        # seluruh PDF.
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        segment = text[start:end]
 
-    # Format umum Lemonilo:
-    # ITEM ID ... QTY ... UOM
-    rows = re.findall(
-        r"(IFD[A-Z0-9\-\/]+).*?(\d+)\s+(PCS|CTN|BOX)",
-        text,
-        re.IGNORECASE | re.DOTALL
-    )
+        items = []
+        rows = re.findall(
+            r"(IFD[A-Z0-9\-\/]+).*?(\d+)\s+(PCS|CTN|BOX)",
+            segment,
+            re.IGNORECASE | re.DOTALL
+        )
+        for item_id, qty, uom in rows:
+            items.append({
+                "barcode": item_id.strip(),
+                "qty": int(qty),
+                "uom": uom.upper()
+            })
 
-    for item_id, qty, uom in rows:
-        items.append({
-            "barcode": item_id.strip(),
-            "qty": int(qty),
-            "uom": uom.upper()
+        results.append({
+            "no_awb": dn_no,
+            "no_pesanan": dn_no,
+            "items": items
         })
 
-    return {
-        "no_awb": dn_no,
-        "no_pesanan": dn_no,
-        "items": items
-    }
+    return results
 
 
 def next_row(sheets_service, spreadsheet_id, sheet):
@@ -177,53 +198,87 @@ def next_row(sheets_service, spreadsheet_id, sheet):
     return len(result.get("values", [])) + 1
 
 
-def write_sheet(sheets_service, spreadsheet_id, data):
+def get_existing_dn(sheets_service, spreadsheet_id):
+    """Baca kolom A & B sheet Pesanan, kembalikan set No_AWB & No_Pesanan
+    yang sudah pernah tercatat - dipakai untuk cek duplikat."""
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{SHEET_PESANAN}!A:B"
+    ).execute()
+
+    rows = result.get("values", [])
+    existing = set()
+
+    for row in rows[1:]:
+        if len(row) >= 1 and row[0]:
+            existing.add(("AWB", str(row[0]).strip()))
+        if len(row) >= 2 and row[1]:
+            existing.add(("PESANAN", str(row[1]).strip()))
+
+    return existing
+
+
+def filter_duplicate_dn(sheets_service, spreadsheet_id, data_list):
+    """Buang DN yang No_AWB atau No_Pesanan-nya sudah ada di sheet Pesanan."""
+    existing = get_existing_dn(sheets_service, spreadsheet_id)
+    filtered = []
+
+    for data in data_list:
+        awb = str(data.get("no_awb") or "").strip()
+        pesanan = str(data.get("no_pesanan") or "").strip()
+
+        if ("AWB", awb) in existing or ("PESANAN", pesanan) in existing:
+            print(f"SKIP DUPLICATE DN: {awb}")
+            continue
+
+        filtered.append(data)
+        existing.add(("AWB", awb))
+        if pesanan:
+            existing.add(("PESANAN", pesanan))
+
+    return filtered
+
+
+def write_sheet(sheets_service, spreadsheet_id, data_list):
     pesanan = []
     detail = []
 
-    counter = 0
+    for data in data_list:
+        counter = 0
 
-    pesanan.append([
-        data["no_awb"],
-        data["no_pesanan"]
-    ])
-
-    for item in data["items"]:
-        counter += 1
-
-        detail.append([
-            f"DT-{data['no_awb']}-{counter}",
+        pesanan.append([
             data["no_awb"],
-            item["barcode"],
-            "",
-            item["qty"],
-            0,
-            "",
-            "Belum",
-            item["uom"]
+            data["no_pesanan"]
         ])
 
+        for item in data["items"]:
+            counter += 1
+
+            detail.append([
+                f"DT-{data['no_awb']}-{counter}",
+                data["no_awb"],
+                item["barcode"],
+                "",
+                item["qty"],
+                0,
+                "",
+                "Belum",
+                item["uom"]
+            ])
+
     if pesanan:
-        row = next_row(
-            sheets_service,
-            spreadsheet_id,
-            SHEET_PESANAN
-        )
+        row = next_row(sheets_service, spreadsheet_id, SHEET_PESANAN)
+        last = row + len(pesanan) - 1
 
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"{SHEET_PESANAN}!A{row}:B{row}",
+            range=f"{SHEET_PESANAN}!A{row}:B{last}",
             valueInputOption="RAW",
             body={"values": pesanan},
         ).execute()
 
     if detail:
-        row = next_row(
-            sheets_service,
-            spreadsheet_id,
-            SHEET_DETAIL
-        )
-
+        row = next_row(sheets_service, spreadsheet_id, SHEET_DETAIL)
         last = row + len(detail) - 1
 
         sheets_service.spreadsheets().values().update(
@@ -241,31 +296,39 @@ def main():
     drive, sheets = get_services()
 
     files = list_new_pdfs(drive, folder_id)
+    print(f"Ditemukan {len(files)} PDF baru di folder DN masuk.")
 
     for file in files:
-        pdf = download_pdf(drive, file["id"])
+        print(f"Memproses: {file['name']} ({file['id']})")
 
-        data = extract_dn(pdf)
+        try:
+            pdf = download_pdf(drive, file["id"])
+            data_list = extract_dn(pdf)
 
-        if data:
-            write_sheet(
-                sheets,
-                spreadsheet_id,
-                data
-            )
+            if not data_list:
+                print(f"  Bukan format DN Lemonilo: {file['name']}")
+                continue
 
-            move_to_processed(
-                drive,
-                file["id"]
-            )
+            print(f"  -> {len(data_list)} DN terdeteksi di file ini.")
 
-            print(
-                f"Berhasil proses DN {data['no_awb']} dan dipindahkan ke Processed"
-            )
-        else:
-            print(
-                f"Bukan format DN Lemonilo: {file['name']}"
-            )
+            data_list = filter_duplicate_dn(sheets, spreadsheet_id, data_list)
+
+            if not data_list:
+                print("  Semua DN duplicate, tidak ditulis.")
+                move_to_processed(drive, file["id"])
+                continue
+
+            write_sheet(sheets, spreadsheet_id, data_list)
+
+            for data in data_list:
+                print(f"  Berhasil proses DN {data['no_awb']} "
+                      f"({len(data['items'])} item)")
+
+            move_to_processed(drive, file["id"])
+            print(f"  -> {file['name']} dipindahkan ke Processed")
+
+        except Exception as e:
+            print(f"  GAGAL memproses {file['name']}: {e}")
 
 
 if __name__ == "__main__":
