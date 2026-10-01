@@ -335,12 +335,14 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
     sku_to_barcode = build_sku_to_barcode_lookup(sheets_service, spreadsheet_id)
     sku_to_rak = build_sku_to_rak_lookup(sheets_service, spreadsheet_id)
 
+    tanggal_hari_ini = today_wib()
+
     pesanan_rows, detail_rows = [], []
     counter = 0
     for data in results:
         # Urutan kolom Pesanan: No_AWB | No_Pesanan | ID_Shopify | Tanggal | Picker | Status
         # ID_Shopify dikosongkan (bukan hasil ekstraksi PDF, diisi manual/integrasi lain kalau ada)
-        pesanan_rows.append([data["no_awb"], data["no_pesanan"] or "", "", "", "", "Pending"])
+        pesanan_rows.append([data["no_awb"], data["no_pesanan"] or "tanggal_hari_ini", "", "", "", "Pending"])
         for item in data["items"]:
             counter += 1
             sku = item["sku"]
