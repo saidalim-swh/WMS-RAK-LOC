@@ -174,8 +174,9 @@ def extract_dn(pdf_bytes):
             re.IGNORECASE | re.DOTALL
         )
         for item_id, qty, uom in rows:
+            clean_barcode = re.sub(r"[-/]+$", "", item_id.strip())
             items.append({
-                "barcode": item_id.strip(),
+                "barcode": clean_barcode,
                 "qty": int(qty),
                 "uom": uom.upper()
             })
