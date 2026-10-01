@@ -23,6 +23,12 @@ import pdfplumber
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from datetime import datetime, timezone, timedelta
+
+WIB = timezone(timedelta(hours=7))
+
+def today_wib():
+    return datetime.now(WIB).strftime("%Y-%m-%d")
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
