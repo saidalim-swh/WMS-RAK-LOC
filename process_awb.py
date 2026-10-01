@@ -1,7 +1,8 @@
 """
 process_awb.py
 ================
-Dijalankan otomatis oleh GitHub Actions tiap beberapa menit.
+Dijalankan otomatis oleh GitHub Actions tiap beberapa menit (atau manual
+lewat tombol menu di Google Sheets / Run workflow di GitHub).
 Tugas: cek folder Google Drive -> proses PDF AWB baru -> tulis ke Google Sheets
        (tab Pesanan & Detail_Pesanan) -> pindahkan PDF ke folder "Processed".
 
@@ -12,23 +13,22 @@ ENV VARS yang dibutuhkan (diisi lewat GitHub Secrets, lihat README):
 - GCP_SA_KEY_JSON     : isi lengkap file JSON service account (sebagai teks)
 - SPREADSHEET_ID      : ID Google Sheets WMS
 - FOLDER_ID_AWB_MASUK : ID folder Drive tempat admin upload PDF AWB
+
+Perubahan terbaru:
+- Kolom Tanggal di sheet Pesanan sekarang otomatis terisi tanggal saat
+  script ini diproses (zona waktu WIB / UTC+7), bukan dikosongkan lagi.
 """
 import io
 import json
 import os
 import re
 from collections import Counter
+from datetime import datetime, timezone, timedelta
 
 import pdfplumber
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from datetime import datetime, timezone, timedelta
-
-WIB = timezone(timedelta(hours=7))
-
-def today_wib():
-    return datetime.now(WIB).strftime("%Y-%m-%d")
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -39,6 +39,16 @@ SHEET_PESANAN = "Pesanan"
 SHEET_DETAIL = "Detail_Pesanan"
 SHEET_PRODUK = "Produk"
 SHEET_STOK = "Stok"
+
+# Zona waktu WIB (UTC+7). GitHub Actions runner defaultnya pakai UTC,
+# jadi perlu dikoreksi manual supaya tanggal yang tercatat sesuai waktu
+# Indonesia, terutama untuk proses yang jalan dekat tengah malam.
+WIB = timezone(timedelta(hours=7))
+
+
+def today_wib():
+    """Tanggal hari ini dalam zona waktu WIB, format YYYY-MM-DD (ISO)."""
+    return datetime.now(WIB).strftime("%Y-%m-%d")
 
 
 def get_services():
@@ -341,14 +351,22 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
     sku_to_barcode = build_sku_to_barcode_lookup(sheets_service, spreadsheet_id)
     sku_to_rak = build_sku_to_rak_lookup(sheets_service, spreadsheet_id)
 
+    # Tanggal proses (WIB), sama untuk semua baris dalam batch ini
     tanggal_hari_ini = today_wib()
 
     pesanan_rows, detail_rows = [], []
     counter = 0
     for data in results:
         # Urutan kolom Pesanan: No_AWB | No_Pesanan | ID_Shopify | Tanggal | Picker | Status
-        # ID_Shopify dikosongkan (bukan hasil ekstraksi PDF, diisi manual/integrasi lain kalau ada)
-        pesanan_rows.append([data["no_awb"], data["no_pesanan"] or "tanggal_hari_ini", "", "", "", "Pending"])
+        # Tanggal diisi otomatis = tanggal script ini diproses (WIB)
+        pesanan_rows.append([
+            data["no_awb"],
+            data["no_pesanan"] or "",
+            "",                    # ID_Shopify - diisi manual/integrasi lain kalau ada
+            tanggal_hari_ini,      # Tanggal - otomatis, tanggal proses
+            "",                    # Picker - diisi lewat action AppSheet
+            "Pending"
+        ])
         for item in data["items"]:
             counter += 1
             sku = item["sku"]
