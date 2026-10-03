@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: "*/3 1-5 * * 1-6"
   workflow_dispatch:
-    repository_dispatch:
+  repository_dispatch:
     types: [dn-upload]
 
 jobs:
