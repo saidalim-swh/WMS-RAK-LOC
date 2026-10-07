@@ -15,8 +15,20 @@ ENV VARS yang dibutuhkan (diisi lewat GitHub Secrets, lihat README):
 - FOLDER_ID_AWB_MASUK : ID folder Drive tempat admin upload PDF AWB
 
 Perubahan terbaru:
-- Kolom Tanggal di sheet Pesanan sekarang otomatis terisi tanggal saat
-  script ini diproses (zona waktu WIB / UTC+7), bukan dikosongkan lagi.
+- Kolom Tanggal di sheet Pesanan otomatis terisi tanggal proses (WIB).
+- PERBAIKAN AKURASI EKSTRAKSI ITEM (penting):
+  Label AWB biasanya menulis tiap baris produk begitu kode SKU muncul
+  DUA KALI di baris yang sama: sekali di teks deskripsi produk
+  ("IFDBC00013 LEMONILO BROWNIES CRISPY RASA CHOCOCHIPS 33GR") dan
+  sekali lagi di kolom SKU tabel yang diikuti langsung oleh Qty
+  ("...33GR IFDBC00013 1"). Versi lama mengambil ANGKA PERTAMA yang
+  ketemu setelah SKU - itu salah, karena bisa kena angka berat produk
+  ("33" dari "33GR") atau jumlah pcs bundle ("3" dari "3 Pcs"), bukan
+  Qty yang sebenarnya. Versi ini mengambil angka SETELAH KEMUNCULAN
+  SKU YANG TERAKHIR di baris itu, yang jauh lebih akurat.
+  Selain itu, kalau 1 SKU muncul di beberapa baris berbeda (misal jadi
+  produk tunggal SEKALIGUS ikut dalam 1 paket bundle), qty-nya sekarang
+  DIJUMLAHKAN, bukan dibuang karena dianggap "duplikat".
 """
 import io
 import json
@@ -104,6 +116,62 @@ def move_file(drive_service, file_id, new_parent_id, old_parent_id):
     ).execute()
 
 
+def extract_sku_qty_pairs(text):
+    """
+    Cari semua pasangan (SKU, Qty) dari teks sebuah halaman/segmen.
+
+    Pola khas label: SKU muncul DUA KALI di baris yang sama -
+        "<indent> IFDBC00013 LEMONILO BROWNIES CRISPY RASA CHOCOCHIPS 33GR   IFDBC00013   1"
+         ^ kemunculan pertama (bagian deskripsi)                             ^ kemunculan
+                                                                                kedua (kolom
+                                                                                SKU tabel),
+                                                                                diikuti Qty
+
+    Qty HARUS diambil dari angka setelah kemunculan SKU yang TERAKHIR,
+    supaya tidak ketuker angka berat ("33" dari "33GR") atau jumlah pcs
+    bundle ("3" dari "3 Pcs") yang ada di antara dua kemunculan SKU itu.
+
+    Kalau SKU cuma kebaca SEKALI di baris (kemungkinan kolom SKU tabel
+    gagal ke-extract terpisah / tumpang tindih di PDF sumber), fallback:
+    ambil angka pertama setelah kemunculan SKU itu, atau cari di 4 baris
+    berikutnya kalau di baris yang sama tidak ada angka sama sekali.
+    """
+    pairs = []
+    lines = text.splitlines()
+
+    for i, line in enumerate(lines):
+        sku_matches = list(re.finditer(r"\b(IFD[A-Z0-9]+)\b", line))
+        if not sku_matches:
+            continue
+
+        sku = sku_matches[0].group(1)
+
+        if len(sku_matches) >= 2:
+            # Ada >=2 kemunculan SKU di baris yang sama - ambil angka
+            # setelah kemunculan TERAKHIR (kolom SKU tabel + Qty asli).
+            after = line[sku_matches[-1].end():]
+        else:
+            # Cuma 1 kemunculan - ambil angka setelah itu saja.
+            after = line[sku_matches[0].end():]
+
+        qty_match = re.search(r"\b(\d+)\b", after)
+        qty = qty_match.group(1) if qty_match else None
+
+        if not qty:
+            # Fallback terakhir: cari di beberapa baris berikutnya,
+            # untuk kasus tabel yang "meluber" ke baris baru.
+            for next_line in lines[i + 1:i + 5]:
+                qty_match = re.search(r"\b(\d+)\b", next_line)
+                if qty_match:
+                    qty = qty_match.group(1)
+                    break
+
+        if qty:
+            pairs.append((sku, qty))
+
+    return pairs
+
+
 def extract_page(text):
     candidates = re.findall(r"\b[A-Z]{2,5}\d{6,12}\b", text)
     no_awb = Counter(candidates).most_common(1)[0][0] if candidates else None
@@ -129,60 +197,31 @@ def extract_page(text):
         m2 = re.search(r"Order\s*Id\s*:\s*([A-Za-z0-9]+)", text, re.IGNORECASE)
         no_pesanan = m2.group(1) if m2 else None
 
-    # Item fisik: SEMUA kode SKU barang fisik Lemonilo selalu diawali "IFD"
-    # (beda dari kode SKU paket/bundle yang diawali "OS..."). Cukup cari pola
-    # "IFD... <spasi> <qty>" di mana saja di teks - TIDAK perlu 2 kemunculan
-    # token yang sama (beda dari pendekatan lama yang gagal kalau bagian
-    # "pembuka" rusak/tumpang tindih akibat PDF sumbernya sendiri).
-    # Contoh yang harus tertangkap:
-    #   "IFDBC00016 30"        -> normal
-    #   "IFDBC00016- 10"       -> varian TTS/renceng, strip tanda '-' di akhir
-    #   "...garbled...IFDBC00016 30" -> tetap ketemu walau teks sebelumnya rusak
-    # Ekstraksi SKU lebih tahan terhadap format tabel PDF:
-    # beberapa AWB memisahkan SKU dan Qty ke posisi kolom berbeda.
-    raw_items = []
-    lines = text.splitlines()
+    # Ekstraksi item: ambil semua pasangan (SKU, Qty) dari teks, lalu
+    # JUMLAHKAN qty untuk SKU yang sama (bukan dibuang sebagai "duplikat").
+    # Ini penting karena 1 SKU bisa muncul di beberapa baris berbeda -
+    # misalnya jadi produk tunggal SEKALIGUS ikut dalam 1 paket bundle
+    # di baris lain pada label yang sama.
+    raw_pairs = extract_sku_qty_pairs(text)
 
-    for i, line in enumerate(lines):
-        sku_match = re.search(r"\b(IFD[A-Z0-9]+)\b", line)
-        if not sku_match:
-            continue
-
-        sku = sku_match.group(1)
-        qty = None
-
-        # cari qty pada baris yang sama
-        same_line = line.replace(sku, "")
-        qty_match = re.search(r"\b(\d+)\b", same_line)
-        if qty_match:
-            qty = qty_match.group(1)
-
-        # kalau tidak ada, cari beberapa baris setelahnya
-        if not qty:
-            for next_line in lines[i+1:i+5]:
-                qty_match = re.search(r"\b(\d+)\b", next_line)
-                if qty_match:
-                    qty = qty_match.group(1)
-                    break
-
-        if qty:
-            raw_items.append((sku, qty))
-
-    items, seen = [], set()
-    for sku, qty in raw_items:
+    qty_by_sku = {}
+    order = []
+    for sku, qty in raw_pairs:
         if sku == no_awb:
             continue
-        key = (sku, qty)
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append({"sku": sku, "qty": int(qty)})
+        if sku not in qty_by_sku:
+            order.append(sku)
+            qty_by_sku[sku] = 0
+        qty_by_sku[sku] += int(qty)
+
+    items = [{"sku": sku, "qty": qty_by_sku[sku]} for sku in order]
 
     # Pengaman: kalau produk disebut "campur beberapa rasa" (mis. "9 Renceng
-    # (3 Chocochips + 3 keju + 3 Strawberry)") tapi jumlah item yang berhasil
-    # dibaca tidak sesuai jumlah rasa yang disebut - ini indikasi ada item
-    # yang gagal terbaca akibat teks PDF yang tumpang tindih (bukan bug regex,
-    # tapi masalah di PDF sumbernya). Kasih peringatan supaya dicek manual.
+    # (3 Chocochips + 3 keju + 3 Strawberry)") tapi jumlah SKU unik yang
+    # berhasil dibaca tidak sesuai jumlah rasa yang disebut - ini indikasi
+    # ada item yang gagal terbaca akibat teks PDF yang tumpang tindih (bukan
+    # bug regex, tapi masalah di PDF sumbernya). Kasih peringatan supaya
+    # dicek manual.
     warning = None
     # (?!\+) mencegah nomor telepon format "(+62)81..." ikut kedeteksi -
     # bundle asli selalu diawali angka (mis. "(3 Chocochips + 3 keju...)"),
@@ -193,10 +232,27 @@ def extract_page(text):
         if len(items) < expected_flavors:
             warning = (
                 f"Terdeteksi varian campur ({expected_flavors} rasa) tapi cuma "
-                f"{len(items)} item yang terbaca - kemungkinan ada item hilang, cek manual."
+                f"{len(items)} SKU unik yang terbaca - kemungkinan ada item hilang, cek manual."
             )
 
     return {"no_awb": no_awb, "no_pesanan": no_pesanan, "items": items, "warning": warning}
+
+
+def _merge_items(existing_items, new_items):
+    """Gabungkan dua list item (masing-masing [{'sku':..,'qty':..}, ...]),
+    JUMLAHKAN qty untuk SKU yang sama. Dipakai saat 1 AWB 'meluber' ke
+    beberapa halaman PDF."""
+    qty_by_sku = {it["sku"]: it["qty"] for it in existing_items}
+    order = [it["sku"] for it in existing_items]
+
+    for item in new_items:
+        sku = item["sku"]
+        if sku not in qty_by_sku:
+            order.append(sku)
+            qty_by_sku[sku] = 0
+        qty_by_sku[sku] += item["qty"]
+
+    return [{"sku": sku, "qty": qty_by_sku[sku]} for sku in order]
 
 
 def extract_all_pages(pdf_bytes):
@@ -204,7 +260,8 @@ def extract_all_pages(pdf_bytes):
     Ekstrak semua halaman. Kalau 1 AWB punya banyak barang, daftarnya bisa
     'meluber' ke halaman berikutnya - halaman lanjutan itu TIDAK punya
     barcode/No_AWB lagi. Halaman seperti itu dianggap lanjutan dari AWB
-    terakhir yang terdeteksi, bukan dibuang.
+    terakhir yang terdeteksi, bukan dibuang. Item dengan SKU yang sama di
+    halaman lanjutan DIJUMLAHKAN ke item yang sudah ada, bukan di-skip.
     """
     results = []
     current = None
@@ -228,12 +285,7 @@ def extract_all_pages(pdf_bytes):
                 results.append(current)
             elif current is not None and data["items"]:
                 # halaman tanpa No_AWB tapi ada data item -> lanjutan AWB sebelumnya
-                existing_keys = {(it["sku"], it["qty"]) for it in current["items"]}
-                for item in data["items"]:
-                    key = (item["sku"], item["qty"])
-                    if key not in existing_keys:
-                        current["items"].append(item)
-                        existing_keys.add(key)
+                current["items"] = _merge_items(current["items"], data["items"])
                 if data.get("warning") and not current.get("warning"):
                     current["warning"] = data["warning"]
     return results
