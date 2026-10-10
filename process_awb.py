@@ -57,6 +57,9 @@ SHEET_STOK = "Stok"
 # Indonesia, terutama untuk proses yang jalan dekat tengah malam.
 WIB = timezone(timedelta(hours=7))
 
+# Penanda versi - dicetak di awal log supaya bisa dicek file mana yang jalan.
+SCRIPT_VERSION = "2026-10-10-kolom-v3"
+
 
 def today_wib():
     """Tanggal hari ini dalam zona waktu WIB, format YYYY-MM-DD (ISO)."""
@@ -174,6 +177,30 @@ def extract_sku_qty_pairs(text):
     return pairs
 
 
+def get_clean_words(page):
+    """
+    Bentuk daftar kata dari karakter halaman, tapi PER KELOMPOK (font, ukuran).
+
+    Kenapa: beberapa label PDF punya dua lapisan teks yang bertumpuk di area
+    yang sama (mis. baris SKU produk ditimpa teks "Qty Total: 2" yang
+    berfont/ukuran lain). Kalau semua karakter digabung sekaligus, huruf dari
+    dua teks itu ikut berselang-seling dan menghasilkan kata rusak seperti
+    "IFDBC000Q16ty To60tal: 2". Dengan memisahkan per font+ukuran lebih dulu,
+    tiap teks tetap utuh ("IFDBC00016", "60", "Qty", "Total:", "2").
+    """
+    from pdfplumber.utils import extract_words as _extract_words
+
+    groups = {}
+    for ch in page.chars:
+        key = (ch.get("fontname"), round(ch.get("size", 0), 1))
+        groups.setdefault(key, []).append(ch)
+
+    words = []
+    for chars in groups.values():
+        words.extend(_extract_words(chars))
+    return words
+
+
 def extract_pairs_by_columns(page):
     """
     Cara PALING AKURAT: baca pasangan (SKU, Qty) berdasarkan POSISI KOLOM
@@ -191,7 +218,7 @@ def extract_pairs_by_columns(page):
     Return: list of (sku, qty_str), atau None kalau halaman ini tidak punya
     header "SKU" & "Qty" yang bisa dikenali (caller fallback ke cara teks).
     """
-    words = page.extract_words()
+    words = get_clean_words(page)
 
     sku_headers = [w for w in words if w["text"].strip().lower() == "sku"]
     qty_headers = [w for w in words if w["text"].strip().lower() == "qty"]
@@ -240,7 +267,10 @@ def extract_pairs_by_columns(page):
             print(f"PERINGATAN: Qty untuk SKU {m.group(1)} tidak ketemu di kolom Qty.")
             continue
 
-        best = min(candidates, key=lambda d: abs((d["top"] + d["bottom"]) / 2 - cy))
+        best = min(
+            candidates,
+            key=lambda d: (round(abs((d["top"] + d["bottom"]) / 2 - cy), 1), d["x0"]),
+        )
         pairs.append((m.group(1), best["text"]))
 
     return pairs or None
@@ -346,13 +376,19 @@ def extract_all_pages(pdf_bytes):
         for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
 
-            if debug_raw_text:
-                print(f"\n----- RAW TEXT HALAMAN {page_num} -----")
-                print(text)
-                print(f"----- END RAW TEXT HALAMAN {page_num} -----\n")
-
             column_pairs = extract_pairs_by_columns(page)
             data = extract_page(text, column_pairs=column_pairs)
+
+            if debug_raw_text:
+                print(f"\n----- DEBUG HALAMAN {page_num} -----")
+                print("[TEKS MENTAH]")
+                print(text)
+                print("[KATA + KOORDINAT] (x0, top, teks)")
+                for w in sorted(page.extract_words(), key=lambda w: (round(w["top"]), w["x0"])):
+                    print(f"  x0={w['x0']:.0f} top={w['top']:.0f} {w['text']}")
+                print(f"[JALUR KOLOM] hasil: {column_pairs}")
+                print(f"[HASIL ITEM] {data['items']}")
+                print(f"----- END DEBUG HALAMAN {page_num} -----\n")
 
             # Halaman "asli" (bukan lanjutan) selalu punya info pengirim/penerima.
             # Halaman lanjutan cuma berisi sambungan tabel barang saja.
@@ -543,6 +579,7 @@ def write_to_sheets(sheets_service, spreadsheet_id, results):
 
 
 def main():
+    print(f"process_awb.py versi {SCRIPT_VERSION}")
     spreadsheet_id = os.environ["SPREADSHEET_ID"]
     folder_id = os.environ["FOLDER_ID_AWB_MASUK"]
 
