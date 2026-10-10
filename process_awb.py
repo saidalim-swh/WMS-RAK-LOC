@@ -154,14 +154,16 @@ def extract_sku_qty_pairs(text):
             # Cuma 1 kemunculan - ambil angka setelah itu saja.
             after = line[sku_matches[0].end():]
 
-        qty_match = re.search(r"\b(\d+)\b", after)
+        # Qty realistis maksimal 4 digit - supaya nomor pesanan/nomor resi
+        # yang panjang tidak pernah salah terbaca sebagai qty.
+        qty_match = re.search(r"\b(\d{1,4})\b", after)
         qty = qty_match.group(1) if qty_match else None
 
         if not qty:
             # Fallback terakhir: cari di beberapa baris berikutnya,
             # untuk kasus tabel yang "meluber" ke baris baru.
             for next_line in lines[i + 1:i + 5]:
-                qty_match = re.search(r"\b(\d+)\b", next_line)
+                qty_match = re.search(r"\b(\d{1,4})\b", next_line)
                 if qty_match:
                     qty = qty_match.group(1)
                     break
@@ -172,7 +174,79 @@ def extract_sku_qty_pairs(text):
     return pairs
 
 
-def extract_page(text):
+def extract_pairs_by_columns(page):
+    """
+    Cara PALING AKURAT: baca pasangan (SKU, Qty) berdasarkan POSISI KOLOM
+    di halaman PDF (koordinat x/y), bukan berdasarkan urutan baris teks.
+
+    Kenapa perlu: di tabel produk, kolom "Nama Produk/deskripsi" dan kolom
+    "SKU"/"Qty" sering punya jumlah baris wrap yang berbeda. Akibatnya
+    nilai kolom SKU+Qty bisa jatuh di baris teks yang BERBEDA dari baris
+    deskripsi "-> IFDxxxx ...". Kalau dibaca per baris teks, Qty gampang
+    ketuker dengan angka lain (nomor urut, dll). Dengan koordinat, kita
+    cukup cari kode IFD yang posisinya ada DI BAWAH header kolom "SKU",
+    lalu ambil angka di kolom "Qty" yang SEJAJAR secara vertikal dengannya.
+    Kode IFD di kolom deskripsi (sebelah kiri) otomatis diabaikan.
+
+    Return: list of (sku, qty_str), atau None kalau halaman ini tidak punya
+    header "SKU" & "Qty" yang bisa dikenali (caller fallback ke cara teks).
+    """
+    words = page.extract_words()
+
+    sku_headers = [w for w in words if w["text"].strip().lower() == "sku"]
+    qty_headers = [w for w in words if w["text"].strip().lower() == "qty"]
+    if not sku_headers or not qty_headers:
+        return None
+
+    # Pasangkan header "SKU" dengan header "Qty" yang ada di baris yang sama
+    header_pairs = []
+    for s in sku_headers:
+        q = min(qty_headers, key=lambda h: abs(h["top"] - s["top"]))
+        if abs(q["top"] - s["top"]) <= 10 and q["x0"] > s["x0"]:
+            header_pairs.append((s, q))
+    if not header_pairs:
+        return None
+    header_pairs.sort(key=lambda p: p[0]["top"])
+
+    digit_words = [w for w in words if w["text"].isdigit()]
+
+    pairs = []
+    for w in words:
+        m = re.match(r"^(IFD[A-Z0-9]+)", w["text"])
+        if not m:
+            continue
+
+        # Header tabel terdekat DI ATAS kode ini (halaman bisa punya >1 tabel)
+        above = [p for p in header_pairs if p[0]["top"] <= w["top"] + 2]
+        if not above:
+            continue
+        s_hdr, q_hdr = above[-1]
+
+        # Hanya kode yang berada di KOLOM SKU (bukan di kolom deskripsi)
+        if not (s_hdr["x0"] - 20 <= w["x0"] < q_hdr["x0"]):
+            continue
+
+        cy = (w["top"] + w["bottom"]) / 2
+        tol = max(3.0, (w["bottom"] - w["top"]) * 0.6)
+
+        # Angka di kolom Qty yang sejajar vertikal dengan kode SKU ini
+        candidates = [
+            d for d in digit_words
+            if d["x0"] >= q_hdr["x0"] - 20
+            and d["x0"] >= w["x1"] - 2
+            and abs((d["top"] + d["bottom"]) / 2 - cy) <= tol
+        ]
+        if not candidates:
+            print(f"PERINGATAN: Qty untuk SKU {m.group(1)} tidak ketemu di kolom Qty.")
+            continue
+
+        best = min(candidates, key=lambda d: abs((d["top"] + d["bottom"]) / 2 - cy))
+        pairs.append((m.group(1), best["text"]))
+
+    return pairs or None
+
+
+def extract_page(text, column_pairs=None):
     candidates = re.findall(r"\b[A-Z]{2,5}\d{6,12}\b", text)
     no_awb = Counter(candidates).most_common(1)[0][0] if candidates else None
 
@@ -202,7 +276,9 @@ def extract_page(text):
     # Ini penting karena 1 SKU bisa muncul di beberapa baris berbeda -
     # misalnya jadi produk tunggal SEKALIGUS ikut dalam 1 paket bundle
     # di baris lain pada label yang sama.
-    raw_pairs = extract_sku_qty_pairs(text)
+    # Prioritas: pembacaan berbasis kolom (akurat). Kalau halaman tidak punya
+    # header "SKU"/"Qty" yang bisa dikenali, baru fallback ke cara teks.
+    raw_pairs = column_pairs if column_pairs else extract_sku_qty_pairs(text)
 
     qty_by_sku = {}
     order = []
@@ -265,10 +341,18 @@ def extract_all_pages(pdf_bytes):
     """
     results = []
     current = None
+    debug_raw_text = os.environ.get("DEBUG_RAW_TEXT") == "1"
     with pdfplumber.open(pdf_bytes) as pdf:
-        for page in pdf.pages:
+        for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
-            data = extract_page(text)
+
+            if debug_raw_text:
+                print(f"\n----- RAW TEXT HALAMAN {page_num} -----")
+                print(text)
+                print(f"----- END RAW TEXT HALAMAN {page_num} -----\n")
+
+            column_pairs = extract_pairs_by_columns(page)
+            data = extract_page(text, column_pairs=column_pairs)
 
             # Halaman "asli" (bukan lanjutan) selalu punya info pengirim/penerima.
             # Halaman lanjutan cuma berisi sambungan tabel barang saja.
