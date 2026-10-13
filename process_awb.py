@@ -58,7 +58,7 @@ SHEET_STOK = "Stok"
 WIB = timezone(timedelta(hours=7))
 
 # Penanda versi - dicetak di awal log supaya bisa dicek file mana yang jalan.
-SCRIPT_VERSION = "2026-10-10-kolom-v3"
+SCRIPT_VERSION = "2026-10-14-pesanan-v4"
 
 
 def today_wib():
@@ -295,10 +295,12 @@ def extract_page(text, column_pairs=None):
                 no_awb = fm.group(1)
                 break
 
-    m = re.search(r"No\.?\s*Pesanan\s*:\s*([A-Za-z0-9]+)", text)
+    # Titik dua bisa berupa ":" biasa ATAU "：" (lebar penuh, dipakai di sebagian
+    # label J&T Cargo: "TT Order ID ：586489710414759916"). Keduanya harus dikenali.
+    m = re.search(r"No\.?\s*Pesanan\s*[:：]\s*([A-Za-z0-9]+)", text)
     no_pesanan = m.group(1) if m else None
     if not no_pesanan:
-        m2 = re.search(r"Order\s*Id\s*:\s*([A-Za-z0-9]+)", text, re.IGNORECASE)
+        m2 = re.search(r"Order\s*Id\s*[:：]\s*([A-Za-z0-9]+)", text, re.IGNORECASE)
         no_pesanan = m2.group(1) if m2 else None
 
     # Ekstraksi item: ambil semua pasangan (SKU, Qty) dari teks, lalu
@@ -403,11 +405,28 @@ def extract_all_pages(pdf_bytes):
                 # halaman baru dengan No_AWB sendiri -> mulai entry baru
                 current = data
                 results.append(current)
-            elif current is not None and data["items"]:
-                # halaman tanpa No_AWB tapi ada data item -> lanjutan AWB sebelumnya
-                current["items"] = _merge_items(current["items"], data["items"])
+            elif current is not None and (data["items"] or data["no_pesanan"]):
+                # halaman tanpa No_AWB -> kemungkinan lanjutan label sebelumnya.
+                # Pengaman: kalau halaman ini menyebut No_Pesanan yang BERBEDA
+                # dari label induk, itu bukan lanjutannya - jangan digabung.
+                if (data["no_pesanan"] and current.get("no_pesanan")
+                        and data["no_pesanan"] != current["no_pesanan"]):
+                    print(
+                        f"PERINGATAN: halaman {page_num} menyebut No_Pesanan "
+                        f"{data['no_pesanan']} tapi label sebelumnya {current['no_pesanan']}; "
+                        f"tidak digabung, cek manual."
+                    )
+                    continue
+
+                if data["items"]:
+                    current["items"] = _merge_items(current["items"], data["items"])
                 if data.get("warning") and not current.get("warning"):
                     current["warning"] = data["warning"]
+
+                # No_Pesanan sering HANYA tercetak di halaman lanjutan
+                # ("No. Pesanan: ..."). Ambil dari sana kalau label induk kosong.
+                if not current.get("no_pesanan") and data["no_pesanan"]:
+                    current["no_pesanan"] = data["no_pesanan"]
     return results
 
 
@@ -506,8 +525,11 @@ def filter_duplicate_results(sheets_service, spreadsheet_id, results):
         awb = str(data.get("no_awb") or "").strip()
         pesanan = str(data.get("no_pesanan") or "").strip()
 
-        if ("AWB", awb) in existing or ("PESANAN", pesanan) in existing:
-            print(f"SKIP DUPLICATE: {awb} / {pesanan}")
+        dup_awb = ("AWB", awb) in existing
+        dup_psn = bool(pesanan) and ("PESANAN", pesanan) in existing
+        if dup_awb or dup_psn:
+            alasan = "No_AWB sudah ada di sheet" if dup_awb else "No_Pesanan sudah ada di sheet"
+            print(f"SKIP DUPLICATE: {awb} / {pesanan}  ({alasan})")
             continue
 
         filtered.append(data)
@@ -608,6 +630,8 @@ def main():
             n_pesanan, n_detail = write_to_sheets(sheets_service, spreadsheet_id, results)
             print(f"  -> {len(results)} AWB ditemukan, {n_pesanan} baris Pesanan, {n_detail} baris Detail")
             for r in results:
+                if not r.get("no_pesanan"):
+                    print(f"  ⚠ PERINGATAN: No_Pesanan kosong untuk No_AWB {r['no_awb']}")
                 if r.get("warning"):
                     print(f"  ⚠ PERINGATAN untuk No_AWB {r['no_awb']}: {r['warning']}")
             move_file(drive_service, f["id"], processed_folder_id, folder_id)
