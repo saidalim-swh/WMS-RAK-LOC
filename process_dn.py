@@ -19,6 +19,8 @@ Output:
 Pesanan:
 A No_AWB
 B No_Pesanan
+C ID_Shopify (dikosongkan)
+D Tanggal (otomatis = tanggal proses, WIB)
 
 Detail_Pesanan:
 A ID_Detail
@@ -36,6 +38,7 @@ import io
 import json
 import os
 import re
+from datetime import datetime, timezone, timedelta
 
 import pdfplumber
 from google.oauth2 import service_account
@@ -50,6 +53,16 @@ SCOPES = [
 
 SHEET_PESANAN = "Pesanan"
 SHEET_DETAIL = "Detail_Pesanan"
+
+# Zona waktu WIB (UTC+7). GitHub Actions runner memakai UTC, jadi dikoreksi
+# manual supaya tanggal yang tercatat sesuai waktu Indonesia.
+WIB = timezone(timedelta(hours=7))
+
+
+def today_wib():
+    """Tanggal hari ini dalam zona waktu WIB, format YYYY-MM-DD (ISO)."""
+    return datetime.now(WIB).strftime("%Y-%m-%d")
+
 
 # Kode SKU = "IFD" + huruf/angka, BERHENTI di "-" atau "/" pertama.
 # Jadi "IFDBC00013-SPR/HRC" -> "IFDBC00013" (suffix gudang terbuang).
@@ -199,6 +212,27 @@ def find_dn_markers(words):
     return markers
 
 
+def parse_qty(text):
+    """
+    Ubah teks qty jadi bilangan bulat, dengan memperhatikan pemisah ribuan.
+
+    "1,800" -> 1800   (koma = pemisah ribuan)
+    "1.800" -> 1800   (titik = pemisah ribuan gaya Indonesia)
+    "2,400,000" -> 2400000
+    "5.00" / "5,00" -> 5   (desimal nol)
+    "300" -> 300
+
+    Qty barang selalu bilangan bulat, jadi pola "1-3 digit + kelompok 3 digit"
+    diperlakukan sebagai pemisah ribuan, bukan desimal.
+    """
+    t = str(text).strip()
+    if re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", t):
+        return int(re.sub(r"[.,]", "", t))
+    if re.fullmatch(r"\d+[.,]\d+", t):
+        return int(round(float(t.replace(",", "."))))
+    return int(t)
+
+
 def extract_items_from_words(words):
     """
     Baca item tabel DN berdasarkan POSISI kolom/baris.
@@ -258,7 +292,7 @@ def extract_items_from_words(words):
 
         qty_cands = [
             w for w in region
-            if re.fullmatch(r"\d+(?:[.,]\d+)?", w["text"])
+            if re.fullmatch(r"\d+(?:[.,]\d+)*", w["text"])
             and abs(_cx(w) - qty_cx) <= col_tol
             and y0 <= _cy(w) < y1
         ]
@@ -266,7 +300,7 @@ def extract_items_from_words(words):
             print(f"PERINGATAN: Qty untuk {sku} tidak ketemu di kolom QTY, baris dilewati.")
             continue
         qty_w = min(qty_cands, key=_cy)
-        qty = int(float(qty_w["text"].replace(",", ".")))
+        qty = parse_qty(qty_w["text"])
 
         uom_cands = [
             w for w in region
@@ -293,11 +327,11 @@ def extract_items_from_text(text):
     print("PERINGATAN: header tabel tidak terbaca, memakai cara teks (kurang akurat).")
     items = []
     for item_id, qty, uom in re.findall(
-        r"(IFD[A-Z0-9]+)[^\n]*?\b(\d+)\s+(PCS|CTN|BOX)\b",
+        r"(IFD[A-Z0-9]+)[^\n]*?\b(\d+(?:[.,]\d+)*)\s+(PCS|CTN|BOX)\b",
         text,
         re.IGNORECASE,
     ):
-        items.append({"barcode": clean_sku(item_id), "qty": int(qty), "uom": uom.upper()})
+        items.append({"barcode": clean_sku(item_id), "qty": parse_qty(qty), "uom": uom.upper()})
     return items
 
 
@@ -418,12 +452,19 @@ def write_sheet(sheets_service, spreadsheet_id, data_list):
     pesanan = []
     detail = []
 
+    # Tanggal proses (WIB), sama untuk semua DN dalam batch ini
+    tanggal_hari_ini = today_wib()
+
     for data in data_list:
         counter = 0
 
+        # Urutan kolom Pesanan (sama dengan process_awb.py):
+        # No_AWB | No_Pesanan | ID_Shopify | Tanggal
         pesanan.append([
             data["no_awb"],
-            data["no_pesanan"]
+            data["no_pesanan"],
+            "",                    # ID_Shopify - tidak dari PDF
+            tanggal_hari_ini,      # Tanggal - otomatis, tanggal proses
         ])
 
         for item in data["items"]:
@@ -447,7 +488,7 @@ def write_sheet(sheets_service, spreadsheet_id, data_list):
 
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"{SHEET_PESANAN}!A{row}:B{last}",
+            range=f"{SHEET_PESANAN}!A{row}:D{last}",
             valueInputOption="RAW",
             body={"values": pesanan},
         ).execute()
